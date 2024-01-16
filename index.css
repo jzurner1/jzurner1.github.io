@@ -140,6 +140,7 @@ body {
     width: 1500px;
     margin: auto;
     background-color: darkcyan;
+    color: white;
     display: grid;
     column-gap: 20px;
     row-gap: 10px;
@@ -150,11 +151,11 @@ body {
     background-color: darkgoldenrod;
     display: grid;
     column-gap: 5px;
-    grid-template-columns: auto auto;
-    grid-template-rows: auto auto;
+    row-gap: 5px;
+    grid-template-columns: auto;
 }
 
 .skill-item {
     background-color: darkmagenta;
-    width: fit-content;
+    height: fit-content;
 }
