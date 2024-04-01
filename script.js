@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var navbar = document.getElementById('navbar');
     var startScroll = 100; // Scroll position to start the effect
     var endScroll = 300; // Scroll position to end the effect
-//test
+	
     function updateNavbar() {
         var scrollPosition = window.scrollY;
 
