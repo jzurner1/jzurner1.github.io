@@ -40,3 +40,16 @@ for (i = 0; i < coll.length; i++) {
     }
   });
 }
+
+
+// I know this may trigger on things like a rotated monitor, but it works
+document.addEventListener("DOMContentLoaded", function() {
+  if (window.innerWidth < window.innerHeight) {
+      document.getElementById("mobile-popup").style.display = "block";
+  }
+});
+
+function closePopup() {
+  document.getElementById("mobile-popup").style.display = "none";
+}
+
