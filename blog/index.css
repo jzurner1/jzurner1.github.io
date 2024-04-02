@@ -63,14 +63,15 @@ body {
 
 .blog-container {
     padding: 30px;
+    color: white;
 }
 
 .blog-post {
-    background-color: pink;
+    background-color: #444444;
     margin: 40px 20px 40px 20px;
     display: grid;
     grid-template-columns: 35% 65%;
-    grid-template-rows: 100px 150px;
+    grid-template-rows: auto auto;
 }
 
 .blog-link {
@@ -105,7 +106,6 @@ body {
 }
 
 .blog-description {
-    background-color: yellow;
     padding: 15px;
 }
 
