@@ -139,23 +139,55 @@ body {
 #skills {
     width: 1500px;
     margin: auto;
-    background-color: darkcyan;
+    background-color: #333333;
     color: white;
     display: grid;
     column-gap: 20px;
     row-gap: 10px;
-    grid-template-columns: auto auto auto auto;
+    grid-template-columns: 25% 25% 25% 25%;
+    margin-bottom: 200px;
 }
 
 .skills-container {
-    background-color: darkgoldenrod;
+    background-color: #333333;
     display: grid;
     column-gap: 5px;
     row-gap: 5px;
     grid-template-columns: auto;
+
+    align-content: start;
 }
 
 .skill-item {
-    background-color: darkmagenta;
+    background-color: #404040;
+    color: white;
     height: fit-content;
+    cursor: pointer;
+    padding: 18px;
+    width: 100%;
+    border: none;
+    text-align: left;
+    outline: none;
+    font-size: 15px;
+    margin-bottom: 0;
+}
+
+.skill-item:hover {
+    background-color: #4d4d4d;
+}
+
+.skill-column {
+    background-color: #4d4d4d;
+    color: white;
+    height: fit-content;
+    text-align: center;
+    padding: 18px;
+}
+
+.content {
+    display: none;
+    overflow: hidden;
+    background-color: #595959;
+    padding: 10px 10px 20px 10px;
+    margin: 0 10px 10px 10px;
 }
