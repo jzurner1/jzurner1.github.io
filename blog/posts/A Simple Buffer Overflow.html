@@ -15,7 +15,7 @@
     <head>
         <title>A Simple Buffer Overflow</title>
         <meta charset="utf-8">
-		<link rel="icon" type="image/x-icon" href="logo.PNG">
+		<link rel="icon" type="image/x-icon" href="logo.png">
     </head>
     <body style="background-color: black;">
 	
@@ -107,7 +107,7 @@ The first step of any research is getting familiar with the running program. Giv
 
 <br><br>
 
-<img src="resources/1/run1.PNG" alt="Code running as expected" style="display:block; margin-left:auto; margin-right:auto; width:50%;">
+<img src="resources/1/run1.png" alt="Code running as expected" style="display:block; margin-left:auto; margin-right:auto; width:50%;">
 
 <br>
 
@@ -115,7 +115,7 @@ The only input we had control over was when the program asked for our name. Next
 
 <br><br>
 
-<img src="resources/1/dbg1.PNG" alt="Results of the 'lm' and 'x' commands" style="display:block; margin-left:auto; margin-right:auto; width:100%;">
+<img src="resources/1/dbg1.png" alt="Results of the 'lm' and 'x' commands" style="display:block; margin-left:auto; margin-right:auto; width:100%;">
 
 <br>
 
@@ -123,7 +123,7 @@ Next, I disassembled main:
 
 <br><br>
 
-<img src="resources/1/dbg2.PNG" alt="Disassembly view of main()" style="display:block; margin-left:auto; margin-right:auto; 
+<img src="resources/1/dbg2.png" alt="Disassembly view of main()" style="display:block; margin-left:auto; margin-right:auto; 
 width:100%;">
 
 <br>
@@ -132,7 +132,7 @@ There's nothing interesting here except for the call to <i>read_input_func()</i>
 
 <br><br>
 
-<img src="resources/1/dbg3.PNG" alt="Disassembly view of read_input_func()" style="display:block; margin-left:auto; margin-right:auto; width:100%;">
+<img src="resources/1/dbg3.png" alt="Disassembly view of read_input_func()" style="display:block; margin-left:auto; margin-right:auto; width:100%;">
 
 <br>
 
@@ -165,9 +165,9 @@ Reading this, we can make a few assumptions:
 
 Just to confirm, we can view the values of the strings that we observed (14394000, 14394012, and 1439401c).
 <br><br>
-<img src="resources/1/dbg4.PNG" alt="String value at 14394000" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
-<img src="resources/1/dbg5.PNG" alt="String value at 14394012" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
-<img src="resources/1/dbg6.PNG" alt="String value at 1439401c" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
+<img src="resources/1/dbg4.png" alt="String value at 14394000" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
+<img src="resources/1/dbg5.png" alt="String value at 14394012" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
+<img src="resources/1/dbg6.png" alt="String value at 1439401c" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
 <br>
 
 This mostly confirms our reasoning and, looking back to the code, tells us that to get the "Good job!" string printed, we need to make <i>rbp-4</i> less than or equal to 2710h.
@@ -177,24 +177,24 @@ This mostly confirms our reasoning and, looking back to the code, tells us that 
 First, let's run the program normally and see what happens on the stack.
 
 <br><br>
-<img src="resources/1/dbg7.PNG" alt="Normal execution with 'steve' passed in" style="display:block; margin-left:auto; margin-right:auto; width:50%;"><br>
-<img src="resources/1/dbg8.PNG" alt="Image of current stack" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
+<img src="resources/1/dbg7.png" alt="Normal execution with 'steve' passed in" style="display:block; margin-left:auto; margin-right:auto; width:50%;"><br>
+<img src="resources/1/dbg8.png" alt="Image of current stack" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
 <br>
 
 If we convert the name we submitted ("steve") to ASCII, we get 73 74 65 76 65; this is reflected on the stack at 005ffe30 and 005ffe34 (first highlight). We can also see our target C001h down at 005ffe68. Let's try a longer value just to confirm we can reach out a bit.
 
 <br><br>
-<img src="resources/1/dbg9.PNG" alt="Execution with longer string and image of the stack" style="display:block; margin-left:auto; margin-right:auto; width:75%;"><br>
+<img src="resources/1/dbg9.png" alt="Execution with longer string and image of the stack" style="display:block; margin-left:auto; margin-right:auto; width:75%;"><br>
 
 We can see that the storage for the string fills up and we get closer to overwriting C001h. If we do the math, we can determine that a length of 62 characters passed into the program should overwrite C001h but not the two bytes there that are already empty. Let's try that.
 
 <br><br>
-<img src="resources/1/dbg10.PNG" alt="Execution with longer string and image of the stack" style="display:block; margin-left:auto; margin-right:auto; width:75%;"><br>
+<img src="resources/1/dbg10.png" alt="Execution with longer string and image of the stack" style="display:block; margin-left:auto; margin-right:auto; width:75%;"><br>
 
 Now we have overwritten C001. I used exclamation points as they have ASCII values of 21h, meaning that two of them in a row will overwrite C001h to 2121h while still being less than 2710h, which was the requirement to hit the conditional properly.
 
 <br><br>
-<img src="resources/1/dbg11.PNG" alt="Execution with longer string and image of the stack" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
+<img src="resources/1/dbg11.png" alt="Execution with longer string and image of the stack" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
 
 It worked!
 
