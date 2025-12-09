@@ -1,6 +1,9 @@
 
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
 "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"> 
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
 <html xmlns="http://www.w3.org/1999/xhtml">
     <style>
 		.post {
@@ -65,7 +68,7 @@
 					<p style="margin-bottom: 16px; line-height: 1.4;">
 					
 					
-&emsp;&emsp;Buffer overflows are the typical starting point when learning about binary exploitation. For my own research, I wrote a very simple vulnerable program in C, tossed it in WinDbg, and fiddled with it until I got a simple exploit working. Below is the code that I wrote; it should be pretty easy to see the vulnerability. If you're also new to buffer overflows, I recommend compiling this code and giving it a shot before reading further - the goal is to get "Good job!" printed.
+Buffer overflows are the typical starting point when learning about binary exploitation. For my own research, I wrote a very simple vulnerable program in C, tossed it in WinDbg, and fiddled with it until I got a simple exploit working. Below is the code that I wrote; it should be pretty easy to see the vulnerability. If you're also new to buffer overflows, I recommend compiling this code and giving it a shot before reading further - the goal is to get "Good job!" printed.
 
 <br>
 
@@ -92,14 +95,6 @@ int main() {
     return 0;
 }
 </code></pre>
-
-<br>
-
-I don't have syntax highlighting, so here is a screenshot of it in an IDE:
-
-<br><br>
-
-<img src="resources/1/code.PNG" alt="Code excerpt" style="display:block; margin-left:auto; margin-right:auto; width:50%;">
 
 <br>
 
@@ -195,8 +190,6 @@ Now we have overwritten C001. I used exclamation points as they have ASCII value
 
 <br><br>
 <img src="resources/1/dbg11.png" alt="Execution with longer string and image of the stack" style="display:block; margin-left:auto; margin-right:auto; width:100%;"><br>
-
-It worked!
 
 <br><br>
 
