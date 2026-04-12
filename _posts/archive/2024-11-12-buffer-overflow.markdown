@@ -1,8 +1,9 @@
 ---
 layout: post
-title:  \\[Archived] Buffer Overflow Testing"
+title:  Buffer Overflow Testing
 date:   2024-11-12 21:57:58 -0400
-categories: techniques
+categories: archived
+tags: archived cwe
 ---
 
 # Overview
