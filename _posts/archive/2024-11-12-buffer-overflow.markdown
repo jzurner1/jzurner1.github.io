@@ -4,6 +4,7 @@ title:  Buffer Overflow Testing
 date:   2024-11-12 21:57:58 -0400
 categories: archived
 tags: archived cwe
+description: "Repeating my first foray into buffer overflows with a simple C program and WinDbg"
 ---
 
 # Overview

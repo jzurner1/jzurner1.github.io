@@ -1,0 +1,39 @@
+---
+layout: defaults_layout
+---
+
+<h1>Posts</h1>
+{% for post in site.posts %}
+    {% unless post.tags contains "archived" %}
+        <h2><a href="{{ post.url }}">{{ post.title }}</a></h2>
+        <p style="font-style: italic">{{ post.description }}</p>
+        <p>tags: {{ post.tags | join: ", " }}</p>
+    {% endunless %}
+{% endfor %}
+
+<br>
+<br>
+<br>
+
+<h1>Archived Posts</h1>
+<p>Blog posts that, for one reason or another, aren't up to my standards</p>
+{% for post in site.posts %}
+    {% if post.tags contains "archived" %}
+        <h2><a href="{{ post.url }}">{{ post.title }}</a></h2>
+        <p style="font-style: italic">{{ post.description }}</p>
+        <p>tags: {{ post.tags | join: ", " }}</p>
+    {% endif %}
+{% endfor %}
+
+<br>
+<br>
+<br>
+<h1>Tags</h1>
+{% for tag in site.tags %}
+<h3>{{ tag[0] }}</h3>
+<ul>
+    {% for post in tag[1] %}
+        <li><a href="{{ post.url }}">{{ post.title }}</a></li>
+    {% endfor %}
+</ul>
+{% endfor %}
